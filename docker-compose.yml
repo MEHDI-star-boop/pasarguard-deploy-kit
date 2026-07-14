@@ -1,0 +1,87 @@
+services:
+  # ⚠️ این نسخه‌ی «کیت نصب مشتری»ه - هیچ‌کدوم از سرویس‌ها build نمی‌شن (سورس
+  # پایتون اصلاً این‌جا نیست)، فقط ایمیج آماده از رجیستری خصوصی pull میشه.
+  # سورس اصلی و Dockerfile فقط در ریپوی پرایوت توسعه نگه داشته میشه.
+  #
+  # ⚠️ همه‌ی سرویس‌ها با network_mode: host اجرا می‌شن (به‌جای شبکه‌ی bridge
+  # پیش‌فرض Docker) - روی بعضی سرورها شبکه‌ی bridge/NAT پیش‌فرض داکر خراب عمل
+  # می‌کنه. چون این ربات هیچ پورتی به بیرون باز نمی‌کنه، host mode امنه.
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGPORT: "5432"
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    network_mode: host
+    command: ["redis-server", "--bind", "127.0.0.1", "--protected-mode", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-h", "127.0.0.1", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: ${BOT_IMAGE}
+    command: ["alembic", "upgrade", "head"]
+    network_mode: host
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  bot:
+    image: ${BOT_IMAGE}
+    # ⚠️ اگه از ایمیج obfuscate‌شده با Dockerfile.nuitka استفاده می‌کنی، باید
+    # run_main.py صدا زده بشه نه main.py مستقیم (نگاه کن به Dockerfile.nuitka
+    # برای توضیح کامل). اگه از ایمیج معمولی/غیر-obfuscate استفاده می‌کنی،
+    # این رو به ["python", "main.py"] برگردون.
+    command: ["python", "run_main.py"]
+    restart: unless-stopped
+    network_mode: host
+    env_file: .env
+    volumes:
+      - ./backups:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: ${BOT_IMAGE}
+    command: ["python", "run_worker.py"]
+    restart: unless-stopped
+    network_mode: host
+    env_file: .env
+    volumes:
+      - ./backups:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  redisdata:
