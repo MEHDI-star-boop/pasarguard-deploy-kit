@@ -55,7 +55,7 @@ unset _self _resolved
 #
 # (sudo -E لازمه چون sudo به‌طور پیش‌فرض متغیرهای محیطی رو پاک می‌کنه؛ -E
 # نگهشون می‌داره تا به پروسه‌ی bash داخل pipe برسن.)
-: "${DEPLOY_KIT_BASE_URL:=}"
+: "${DEPLOY_KIT_BASE_URL:=https://raw.githubusercontent.com/MEHDI-star-boop/pasarguard-deploy-kit/refs/heads/main}"
 : "${BOT_IMAGE_DEFAULT:=}"
 : "${REGISTRY_URL_DEFAULT:=ghcr.io}"
 : "${REGISTRY_USER_DEFAULT:=}"
