@@ -55,7 +55,7 @@ unset _self _resolved
 #
 # (sudo -E لازمه چون sudo به‌طور پیش‌فرض متغیرهای محیطی رو پاک می‌کنه؛ -E
 # نگهشون می‌داره تا به پروسه‌ی bash داخل pipe برسن.)
-: "${DEPLOY_KIT_BASE_URL:=https://raw.githubusercontent.com/MEHDI-star-boop/pasarguard-deploy-kit/main}"
+: "${DEPLOY_KIT_BASE_URL:=}"
 : "${BOT_IMAGE_DEFAULT:=}"
 : "${REGISTRY_URL_DEFAULT:=ghcr.io}"
 : "${REGISTRY_USER_DEFAULT:=}"
@@ -334,6 +334,24 @@ require_vendor_config() {
     [ -z "$LICENSE_SERVER_URL_DEFAULT" ] && missing+=("LICENSE_SERVER_URL")
 
     if [ ${#missing[@]} -eq 0 ]; then
+        # ⚠️ اگه مقدارها کامله ولی هنوز هیچ vendor-config.env محلی‌ای نیست -
+        # مثلاً چون نصب یک‌خطی امن (با env var فقط موقع اجرای همون یه دستور،
+        # نه فایل از پیش آماده) انجام شده بود - همین الان یه نسخه‌ی دائمی
+        # می‌سازیم. وگرنه هر دستور بعدی (pasarguardbot update/status/...) که
+        # دیگه اون env varهای موقت رو نداره، دوباره همین خطا رو می‌داد و
+        # کاربر مجبور بود هر بار دستی بسازتش - این‌جوری فقط یه‌بار (همون
+        # اولین اجرای موفق) لازمه، بعدش خودکار برای همیشه یادش می‌مونه.
+        if [ ! -f "./vendor-config.env" ]; then
+            cat > "./vendor-config.env" <<EOF
+BOT_IMAGE_DEFAULT=$BOT_IMAGE_DEFAULT
+REGISTRY_URL_DEFAULT=$REGISTRY_URL_DEFAULT
+REGISTRY_USER_DEFAULT=$REGISTRY_USER_DEFAULT
+REGISTRY_TOKEN_DEFAULT=$REGISTRY_TOKEN_DEFAULT
+LICENSE_SERVER_URL_DEFAULT=$LICENSE_SERVER_URL_DEFAULT
+EOF
+            chmod 600 "./vendor-config.env"  # توکن راز داره - فقط خودِ root بتونه بخونتش
+            step_ok "Saved vendor-config.env here for future commands (update/status/...) - no need to pass env vars again."
+        fi
         return
     fi
 
@@ -538,17 +556,9 @@ do_backup() {
     ensure_deploy_dir
     load_env
     mkdir -p backups
-    local out_file="backups/manual_$(date +%Y%m%d_%H%M%S).sql.gz.enc"
-    # ⚠️ امنیتی: قبلاً این خروجی فقط gzip می‌شد، بدون رمزنگاری - در حالی که
-    # بکاپ‌های خودِ بات (خودکار/دستی از داخل تلگرام) از crypto.py استفاده
-    # می‌کنن. چون این تابع پیش از هر «pasarguardbot update» هم خودکار صدا زده
-    # میشه، یعنی عملاً هر آپدیت یه نسخه‌ی رمزنگاری‌نشده از کل داده‌ی مشتری
-    # (تراکنش‌ها، شماره تلفن‌ها،...) روی دیسک می‌ذاشت. الان با همون SECRET_KEY
-    # (از طریق خودِ کانتینر بات - crypto.py، بدون نیاز به ابزار اضافه روی هاست)
-    # رمزنگاری میشه.
-    local dump_cmd
-    dump_cmd="docker compose exec -T db pg_dump -U '${POSTGRES_USER:-bot}' -d '${POSTGRES_DB:-pasarguard_bot}' --clean --if-exists | gzip | docker compose run --rm -T bot python -c 'import sys, crypto; sys.stdout.buffer.write(crypto.encrypt_bytes(sys.stdin.buffer.read()))' > '$out_file'"
-    run_step "Backing up database (encrypted)" "$dump_cmd"
+    local out_file="backups/manual_$(date +%Y%m%d_%H%M%S).sql.gz"
+    run_step "Backing up database" \
+        "docker compose exec -T db pg_dump -U '${POSTGRES_USER:-bot}' -d '${POSTGRES_DB:-pasarguard_bot}' --clean --if-exists | gzip > '$out_file'"
     step_info "Saved to $out_file"
 }
 
@@ -611,7 +621,7 @@ do_restore() {
     ensure_deploy_dir
     local file="${1:-}"
     if [ -z "$file" ] || [ ! -f "$file" ]; then
-        echo "Usage: pasarguardbot restore <path-to-backup.sql.gz[.enc]>"
+        echo "Usage: pasarguardbot restore <path-to-backup.sql.gz>"
         exit 1
     fi
     load_env
@@ -621,28 +631,6 @@ do_restore() {
         echo "Cancelled."
         exit 0
     fi
-
-    # اگه بکاپ رمزنگاری‌شده‌ست (پسوند .enc، فرمت جدید)، قبل از restore با
-    # SECRET_KEY همین نصب (از طریق خودِ کانتینر بات) رمزگشاییش می‌کنیم؛ بکاپ‌های
-    # قدیمی (بدون .enc، از قبل این تغییر) همون‌طور مستقیم استفاده می‌شن.
-    local restore_source="$file"
-    local tmp_decrypted=""
-    case "$file" in
-        *.enc)
-            tmp_decrypted="$(mktemp)"
-            echo -e "${YELLOW}Decrypting backup...${NC}"
-            if ! docker compose run --rm -T bot python -c '
-import sys, crypto
-sys.stdout.buffer.write(crypto.decrypt_bytes(sys.stdin.buffer.read()))
-' < "$file" > "$tmp_decrypted"; then
-                echo -e "${RED}Decryption failed - wrong SECRET_KEY, or the file is corrupted.${NC}"
-                rm -f "$tmp_decrypted"
-                exit 1
-            fi
-            restore_source="$tmp_decrypted"
-            ;;
-    esac
-
     docker compose stop bot worker
     # قبل از restore، اسکیمای فعلی رو کامل پاک می‌کنیم (نه فقط پیپ کردن مستقیم
     # بکاپ روش) - چون سرور جدید معمولاً از قبل migration خورده (جدول‌ها ساخته
@@ -652,8 +640,7 @@ sys.stdout.buffer.write(crypto.decrypt_bytes(sys.stdin.buffer.read()))
     # هم جدید، روی یه دیتابیس خالی یا از قبل migration‌خورده، یکسان کار می‌کنن.
     docker compose exec -T db psql -U "${POSTGRES_USER:-bot}" -d "${POSTGRES_DB:-pasarguard_bot}" \
         -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
-    gunzip -c "$restore_source" | docker compose exec -T db psql -U "${POSTGRES_USER:-bot}" -d "${POSTGRES_DB:-pasarguard_bot}"
-    [ -n "$tmp_decrypted" ] && rm -f "$tmp_decrypted"
+    gunzip -c "$file" | docker compose exec -T db psql -U "${POSTGRES_USER:-bot}" -d "${POSTGRES_DB:-pasarguard_bot}"
     docker compose start bot worker
     echo -e "${GREEN}Restore complete.${NC}"
 }
